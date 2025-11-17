@@ -1,48 +1,55 @@
 """
-Database Schemas
+Database Schemas for OPTCG App
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model represents a collection in MongoDB. The collection name is the lowercase of the class name.
 """
-
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Literal
+from datetime import datetime
 
-# Example schemas (replace with your own):
+Currency = Literal["USD", "EUR"]
 
-class User(BaseModel):
+class Card(BaseModel):
     """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
+    Cards reference as discovered from external sources
+    Collection name: "card"
     """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    id_code: Optional[str] = Field(None, description="Card code like OP05-119")
+    name: Optional[str] = Field(None, description="Card name")
+    language: Optional[Literal["EN", "JP", "Other"]] = Field(None, description="Language of the card")
+    source: Literal["cardmarket", "pricecharting", "cardtrader", "collectr"] = Field(...)
+    source_url: str = Field(..., description="Deep link to the source product page")
+    image_url: Optional[str] = Field(None, description="Image URL scraped from the source")
 
-class Product(BaseModel):
+class CollectionEntry(BaseModel):
     """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
+    User collection entries
+    Collection name: "collectionentry"
     """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+    card_id: Optional[str] = Field(None, description="Reference to card _id (stringified)")
+    id_code: Optional[str] = Field(None, description="Card code like OP05-119")
+    name: Optional[str] = Field(None)
+    language: Optional[str] = Field(None)
+    source: Optional[str] = Field(None)
+    source_url: Optional[str] = Field(None)
+    image_url: Optional[str] = Field(None, description="Source image URL")
+    custom_image_url: Optional[str] = Field(None, description="User uploaded custom image URL")
 
-# Add your own schemas here:
-# --------------------------------------------------
+    quantity: int = Field(1, ge=1)
+    purchase_price: float = Field(..., ge=0)
+    purchase_currency: Currency = Field("USD")
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+    # Aggregates updated over time
+    last_known_price: Optional[float] = Field(None, ge=0)
+    last_known_currency: Optional[Currency] = Field(None)
+
+class Sale(BaseModel):
+    """
+    Sale transactions to compute realized P&L
+    Collection name: "sale"
+    """
+    collection_entry_id: str = Field(...)
+    sale_price: float = Field(..., ge=0)
+    sale_currency: Currency = Field("USD")
+    quantity: int = Field(1, ge=1)
+    sold_at: datetime = Field(default_factory=datetime.utcnow)
