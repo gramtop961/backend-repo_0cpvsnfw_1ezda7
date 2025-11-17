@@ -1,11 +1,6 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [935] using StatReload
-Form data requires "python-multipart" to be installed. 
-You can install "python-multipart" with: 
-
-pip install python-multipart
-
+INFO:     Started reloader process [1066] using StatReload
 Process SpawnProcess-1:
 Traceback (most recent call last):
   File "/usr/local/lib/python3.13/multiprocessing/process.py", line 313, in _bootstrap
@@ -44,37 +39,11 @@ Traceback (most recent call last):
   File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
   File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
   File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
-  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1022, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1160, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1090, in source_to_code
   File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
-  File "/home/workspace/main.py", line 138, in <module>
-    @app.post("/api/upload-image")
-     ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/lib/python3.13/site-packages/fastapi/routing.py", line 921, in decorator
-    self.add_api_route(
-    ~~~~~~~~~~~~~~~~~~^
-        path,
-        ^^^^^
-    ...<23 lines>...
-        generate_unique_id_function=generate_unique_id_function,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "/usr/local/lib/python3.13/site-packages/fastapi/routing.py", line 860, in add_api_route
-    route = route_class(
-        self.prefix + path,
-    ...<24 lines>...
-        generate_unique_id_function=current_generate_unique_id,
-    )
-  File "/usr/local/lib/python3.13/site-packages/fastapi/routing.py", line 496, in __init__
-    self.body_field = get_body_field(dependant=self.dependant, name=self.unique_id)
-                      ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/local/lib/python3.13/site-packages/fastapi/dependencies/utils.py", line 809, in get_body_field
-    check_file_field(final_field)
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
-  File "/usr/local/lib/python3.13/site-packages/fastapi/dependencies/utils.py", line 101, in check_file_field
-    raise RuntimeError(multipart_not_installed_error) from None
-RuntimeError: Form data requires "python-multipart" to be installed. 
-You can install "python-multipart" with: 
-
-pip install python-multipart
-
+  File "/home/workspace/main.py", line 95
+    for m in re.finditer(r"<a[^>]+href=\"(/en/OnePiece/[^"]+)\"[^>]*>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
+                                                          ^
+SyntaxError: closing parenthesis ']' does not match opening parenthesis '('

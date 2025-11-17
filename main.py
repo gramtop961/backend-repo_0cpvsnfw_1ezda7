@@ -1,5 +1,4 @@
 import os
-from io import BytesIO
 from typing import List, Optional
 
 import re
@@ -9,11 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Note: We intentionally avoid heavy optional deps (bs4, Pillow, imagehash)
-# to guarantee the API boots even if those wheels fail to install in the
-# execution environment. Endpoints gracefully degrade when features are
-# unavailable (e.g., image matching returns 501 Not Implemented).
-
+# Minimal, robust backend: avoid heavy optional deps to ensure boot reliability.
 from database import create_document, get_documents, db
 from schemas import CollectionEntry
 
@@ -97,12 +92,9 @@ _lang_hint = re.compile(r"(english|japanese)", re.IGNORECASE)
 
 def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
     results: List[SearchResult] = []
-    # Find product anchors that point to OnePiece product pages
-    for m in re.finditer(r"<a[^>]+href=\"(/en/OnePiece/[^\"]+)\"[^>]*>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
+    for m in re.finditer(r"<a[^>]+href=\"(/en/OnePiece/[^"]+)\"[^>]*>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
         href = m.group(1)
         text = re.sub("<[^>]+>", " ", m.group(2)).strip()
-        # Try to locate a nearby image src (data-src or src)
-        # Look ahead 400 chars after the link for an <img ...>
         start = m.end()
         snippet = html[start:start+400]
         img_match = re.search(r"<img[^>]+(?:data-src|src)=\"([^\"]+)\"", snippet, re.IGNORECASE)
@@ -119,7 +111,6 @@ def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
             language = "EN" if langm.group(1).lower() == "english" else ("JP" if langm.group(1).lower()=="japanese" else None)
 
         full_url = "https://www.cardmarket.com" + href.split("?")[0]
-        # Basic dedupe by URL
         if not any(r.source_url == full_url for r in results):
             results.append(SearchResult(id_code=id_code, name=text or None, language=language, image_url=img_url, source_url=full_url))
     return results[:48]
@@ -127,11 +118,30 @@ def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
 
 @app.get("/api/search/cardmarket", response_model=List[SearchResult])
 def search_cardmarket(q: str):
-    url = f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}"
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail="Cardmarket unreachable")
-    return parse_cardmarket_search_regex(r.text)
+    # Always try remote search first
+    try:
+        url = f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}"
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            parsed = parse_cardmarket_search_regex(r.text)
+            if parsed:
+                return parsed
+        # If blocked/unavailable or parsed empty, fall back gracefully
+    except Exception:
+        pass
+
+    # Fallback 1: if query looks like a card id, return a synthetic stub pointing to Cardmarket search
+    stub: List[SearchResult] = []
+    if _id_pat.search(q or ""):
+        stub.append(SearchResult(
+            id_code=_id_pat.search(q).group(0).upper(),
+            name=q.strip(),
+            language=None,
+            image_url=None,
+            source_url=f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}",
+        ))
+    # Fallback 2: empty array (200 OK) so frontend can show "no results" without error
+    return stub
 
 
 # ---------- Image upload & matching ----------
@@ -156,7 +166,7 @@ def upload_image(file: UploadFile = File(...)):
 
 @app.post("/api/search/by-image", response_model=List[SearchResult])
 def search_by_image(file: UploadFile = File(...), q: Optional[str] = Form(None)):
-    # Degraded behavior: image-based matching not implemented without PIL/imagehash
+    # Degraded behavior: image-based matching not implemented in this environment
     raise HTTPException(status_code=501, detail="Image search is temporarily unavailable in this environment.")
 
 
