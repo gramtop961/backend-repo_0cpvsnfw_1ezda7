@@ -70,14 +70,14 @@ def get_rate(frm: str = "USD", to: str = "EUR"):
         raise HTTPException(status_code=502, detail=f"Failed to fetch rate: {e}")
 
 
-# ---------- Cardmarket scraping (regex-lite) ----------
+# ---------- Search Result Model ----------
 class SearchResult(BaseModel):
     id_code: Optional[str] = None
     name: Optional[str] = None
     language: Optional[str] = None
     image_url: Optional[str] = None
     source_url: str
-    source: str = "cardmarket"
+    source: str
 
 
 HEADERS = {
@@ -90,14 +90,16 @@ _id_pat = re.compile(r"OP\d{2}-\d{3}", re.IGNORECASE)
 _lang_hint = re.compile(r"(english|japanese)", re.IGNORECASE)
 
 
+# ---------- Cardmarket scraping (regex-lite) ----------
 def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
     results: List[SearchResult] = []
-    for m in re.finditer(r"<a[^>]+href=\"(/en/OnePiece/[^"]+)\"[^>]*>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
+    # Use single-quoted Python string to avoid escaping inner double quotes
+    for m in re.finditer(r'<a[^>]+href="(/en/OnePiece/[^"]+)"[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL):
         href = m.group(1)
         text = re.sub("<[^>]+>", " ", m.group(2)).strip()
         start = m.end()
         snippet = html[start:start+400]
-        img_match = re.search(r"<img[^>]+(?:data-src|src)=\"([^\"]+)\"", snippet, re.IGNORECASE)
+        img_match = re.search(r'<img[^>]+(?:data-src|src)="([^"]+)"', snippet, re.IGNORECASE)
         img_url = img_match.group(1) if img_match else None
 
         id_code = None
@@ -112,7 +114,7 @@ def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
 
         full_url = "https://www.cardmarket.com" + href.split("?")[0]
         if not any(r.source_url == full_url for r in results):
-            results.append(SearchResult(id_code=id_code, name=text or None, language=language, image_url=img_url, source_url=full_url))
+            results.append(SearchResult(id_code=id_code, name=text or None, language=language, image_url=img_url, source_url=full_url, source="cardmarket"))
     return results[:48]
 
 
@@ -139,9 +141,76 @@ def search_cardmarket(q: str):
             language=None,
             image_url=None,
             source_url=f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}",
+            source="cardmarket",
         ))
     # Fallback 2: empty array (200 OK) so frontend can show "no results" without error
     return stub
+
+
+# ---------- Additional sources (PriceCharting, CardTrader, Collectr) ----------
+def build_pricecharting_stub(q: str) -> Optional[SearchResult]:
+    if not q:
+        return None
+    # Construct a search URL on PriceCharting (they may not list cards, this is a stub link)
+    url = f"https://www.pricecharting.com/search-products?type=prices&q={requests.utils.quote(q)}"
+    return SearchResult(id_code=_id_pat.search(q).group(0).upper() if _id_pat.search(q) else None,
+                        name=q.strip(), language=None, image_url=None, source_url=url, source="pricecharting")
+
+
+def build_cardtrader_stub(q: str) -> Optional[SearchResult]:
+    if not q:
+        return None
+    # CardTrader One Piece search page (query param may vary; use generic and safe link)
+    url = f"https://www.cardtrader.com/en/one_piece_card_game/products?search%5Bquery%5D={requests.utils.quote(q)}"
+    return SearchResult(id_code=_id_pat.search(q).group(0).upper() if _id_pat.search(q) else None,
+                        name=q.strip(), language=None, image_url=None, source_url=url, source="cardtrader")
+
+
+def build_collectr_stub(q: str) -> Optional[SearchResult]:
+    if not q:
+        return None
+    # Collectr generic search link
+    url = f"https://www.collectr.store/search?q={requests.utils.quote(q)}"
+    return SearchResult(id_code=_id_pat.search(q).group(0).upper() if _id_pat.search(q) else None,
+                        name=q.strip(), language=None, image_url=None, source_url=url, source="collectr")
+
+
+@app.get("/api/search", response_model=List[SearchResult])
+def search_all(q: str):
+    """Aggregate search across multiple sources. Always returns 200 with results or stubs/empty."""
+    results: List[SearchResult] = []
+
+    # Cardmarket first (best data when available)
+    try:
+        url = f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}"
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            parsed = parse_cardmarket_search_regex(r.text)
+            results.extend(parsed)
+    except Exception:
+        pass
+
+    # Other sources: use stubs to provide navigable links, avoid heavy scraping
+    pc = build_pricecharting_stub(q)
+    ct = build_cardtrader_stub(q)
+    co = build_collectr_stub(q)
+    for s in [pc, ct, co]:
+        if s and not any(r.source == s.source and r.source_url == s.source_url for r in results):
+            results.append(s)
+
+    # If nothing and ID-like query, ensure at least one stub per source
+    if not results and _id_pat.search(q or ""):
+        for s in [
+            SearchResult(id_code=_id_pat.search(q).group(0).upper(), name=q.strip(), language=None, image_url=None,
+                         source_url=f"https://www.cardmarket.com/en/OnePiece/Products/Search?searchString={requests.utils.quote(q)}", source="cardmarket"),
+            build_pricecharting_stub(q),
+            build_cardtrader_stub(q),
+            build_collectr_stub(q),
+        ]:
+            if s:
+                results.append(s)
+
+    return results[:64]
 
 
 # ---------- Image upload & matching ----------
