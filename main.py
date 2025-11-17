@@ -2,17 +2,20 @@ import os
 from io import BytesIO
 from typing import List, Optional
 
+import re
 import requests
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from bs4 import BeautifulSoup
-from PIL import Image
-import imagehash
+
+# Note: We intentionally avoid heavy optional deps (bs4, Pillow, imagehash)
+# to guarantee the API boots even if those wheels fail to install in the
+# execution environment. Endpoints gracefully degrade when features are
+# unavailable (e.g., image matching returns 501 Not Implemented).
 
 from database import create_document, get_documents, db
-from schemas import CollectionEntry, Card
+from schemas import CollectionEntry
 
 app = FastAPI()
 
@@ -72,7 +75,7 @@ def get_rate(frm: str = "USD", to: str = "EUR"):
         raise HTTPException(status_code=502, detail=f"Failed to fetch rate: {e}")
 
 
-# ---------- Cardmarket scraping (basic) ----------
+# ---------- Cardmarket scraping (regex-lite) ----------
 class SearchResult(BaseModel):
     id_code: Optional[str] = None
     name: Optional[str] = None
@@ -88,43 +91,38 @@ HEADERS = {
 }
 
 
-def parse_cardmarket_search(html: str) -> List[SearchResult]:
-    soup = BeautifulSoup(html, "lxml")
+_id_pat = re.compile(r"OP\d{2}-\d{3}", re.IGNORECASE)
+_lang_hint = re.compile(r"(english|japanese)", re.IGNORECASE)
+
+
+def parse_cardmarket_search_regex(html: str) -> List[SearchResult]:
     results: List[SearchResult] = []
-    product_rows = soup.select(".table-body .row, .product-list .row")
-    if not product_rows:
-        product_rows = soup.select(".search-results .row")
-    for row in product_rows:
-        link = row.select_one("a[href*='/en/OnePiece/Products']") or row.select_one("a[href*='/en/OnePiece']")
-        if not link:
-            continue
-        href = "https://www.cardmarket.com" + link.get("href").split("?")[0]
-        name = link.get_text(strip=True) or None
-        # try find image
-        img = row.select_one("img")
-        img_url = None
-        if img and img.get("data-src"):
-            img_url = img.get("data-src")
-        elif img and img.get("src"):
-            img_url = img.get("src")
-        # Try detect id code pattern like OP05-119
+    # Find product anchors that point to OnePiece product pages
+    for m in re.finditer(r"<a[^>]+href=\"(/en/OnePiece/[^\"]+)\"[^>]*>(.*?)</a>", html, re.IGNORECASE | re.DOTALL):
+        href = m.group(1)
+        text = re.sub("<[^>]+>", " ", m.group(2)).strip()
+        # Try to locate a nearby image src (data-src or src)
+        # Look ahead 400 chars after the link for an <img ...>
+        start = m.end()
+        snippet = html[start:start+400]
+        img_match = re.search(r"<img[^>]+(?:data-src|src)=\"([^\"]+)\"", snippet, re.IGNORECASE)
+        img_url = img_match.group(1) if img_match else None
+
         id_code = None
-        text = row.get_text(" ", strip=True)
-        import re
-        m = re.search(r"OP\d{2}-\d{3}", text, re.IGNORECASE)
-        if m:
-            id_code = m.group(0).upper()
-        # language heuristic
+        idm = _id_pat.search(text)
+        if idm:
+            id_code = idm.group(0).upper()
+
         language = None
-        lang_el = row.select_one(".product-attributes img[title]")
-        if lang_el:
-            title = lang_el.get("title", "").lower()
-            if "english" in title:
-                language = "EN"
-            elif "japanese" in title:
-                language = "JP"
-        results.append(SearchResult(id_code=id_code, name=name, language=language, image_url=img_url, source_url=href))
-    return results
+        langm = _lang_hint.search(text)
+        if langm:
+            language = "EN" if langm.group(1).lower() == "english" else ("JP" if langm.group(1).lower()=="japanese" else None)
+
+        full_url = "https://www.cardmarket.com" + href.split("?")[0]
+        # Basic dedupe by URL
+        if not any(r.source_url == full_url for r in results):
+            results.append(SearchResult(id_code=id_code, name=text or None, language=language, image_url=img_url, source_url=full_url))
+    return results[:48]
 
 
 @app.get("/api/search/cardmarket", response_model=List[SearchResult])
@@ -133,20 +131,23 @@ def search_cardmarket(q: str):
     r = requests.get(url, headers=HEADERS, timeout=15)
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail="Cardmarket unreachable")
-    return parse_cardmarket_search(r.text)
+    return parse_cardmarket_search_regex(r.text)
 
 
 # ---------- Image upload & matching ----------
 @app.post("/api/upload-image")
 def upload_image(file: UploadFile = File(...)):
     try:
-        contents = file.file.read()
-        image = Image.open(BytesIO(contents)).convert("RGB")
-        # save as webp for size
-        base_name = os.path.splitext(file.filename or "upload")[0]
-        safe_name = base_name.replace(" ", "_")
-        out_path = os.path.join(UPLOAD_DIR, f"{safe_name}.webp")
-        image.save(out_path, format="WEBP", quality=85)
+        filename = (file.filename or "upload").replace(" ", "_")
+        base, ext = os.path.splitext(filename)
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", base) + (ext if ext else "")
+        out_path = os.path.join(UPLOAD_DIR, safe)
+        with open(out_path, "wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
         url = f"/uploads/{os.path.basename(out_path)}"
         return {"url": url}
     except Exception as e:
@@ -155,35 +156,8 @@ def upload_image(file: UploadFile = File(...)):
 
 @app.post("/api/search/by-image", response_model=List[SearchResult])
 def search_by_image(file: UploadFile = File(...), q: Optional[str] = Form(None)):
-    try:
-        target = Image.open(file.file).convert("RGB")
-        target_hash = imagehash.average_hash(target)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid image upload")
-
-    if not q:
-        raise HTTPException(status_code=400, detail="Image search requires a query to narrow results.")
-
-    candidates = search_cardmarket(q)
-
-    matched: List[SearchResult] = []
-    for c in candidates:
-        if not c.image_url:
-            continue
-        try:
-            img_resp = requests.get(c.image_url, headers=HEADERS, timeout=15)
-            if img_resp.status_code != 200:
-                continue
-            cand_img = Image.open(BytesIO(img_resp.content)).convert("RGB")
-            cand_hash = imagehash.average_hash(cand_img)
-            dist = target_hash - cand_hash
-            # Exact or near-exact match threshold
-            if dist <= 2:
-                if c.language in ("EN", "JP"):
-                    matched.append(c)
-        except Exception:
-            continue
-    return matched
+    # Degraded behavior: image-based matching not implemented without PIL/imagehash
+    raise HTTPException(status_code=501, detail="Image search is temporarily unavailable in this environment.")
 
 
 # ---------- Collection CRUD ----------
@@ -233,12 +207,18 @@ def add_to_collection(payload: AddToCollectionPayload):
 @app.put("/api/collection/{entry_id}/image")
 def set_custom_image(entry_id: str, file: UploadFile = File(...)):
     try:
-        contents = file.file.read()
-        image = Image.open(BytesIO(contents)).convert("RGB")
-        out_path = os.path.join(UPLOAD_DIR, f"custom_{entry_id}.webp")
-        image.save(out_path, format="WEBP", quality=85)
+        filename = f"custom_{entry_id}.bin"
+        out_path = os.path.join(UPLOAD_DIR, filename)
+        with open(out_path, "wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
         url = f"/uploads/{os.path.basename(out_path)}"
-        db["collectionentry"].update_one({"_id": __import__("bson").ObjectId(entry_id)}, {"$set": {"custom_image_url": url}})
+        # Update DB reference
+        from bson import ObjectId
+        db["collectionentry"].update_one({"_id": ObjectId(entry_id)}, {"$set": {"custom_image_url": url}})
         return {"custom_image_url": url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
